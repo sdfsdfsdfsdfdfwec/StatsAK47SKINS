@@ -21,5 +21,6 @@ WORKDIR /app
 COPY --from=backend /app/server .
 COPY --from=frontend /app/build ./static
 ENV STATIC_DIR=/app/static
+ENV PORT=8080
 EXPOSE 8080
 CMD ["./server"]
