@@ -19,7 +19,9 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /app
 COPY --from=backend /app/server .
-COPY --from=frontend /app/build ./static
+RUN mkdir -p /app/static
+COPY --from=frontend /app/build/index.html /app/static/index.html
+COPY --from=frontend /app/build/static /app/static
 ENV STATIC_DIR=/app/static
 ENV PORT=8080
 EXPOSE 8080

@@ -14,48 +14,197 @@ const (
 	apiBaseURL       = "https://api.fearproject.ru"
 	leaderboardPath  = "/leaderboard/drops"
 	storagePath      = "/profile/%s/storage"
-	requestDelay     = 150 * time.Millisecond
-	maxPages         = 214
-	quickPages       = 20
+	battlepassPath   = "/battlepass/rewards"
+	requestDelay     = 100 * time.Millisecond
 	itemsPerPage     = 10
 	nouveauRougeName = "AK-47 | Nouveau Rouge"
-	fastInterval     = 15 * time.Minute
-	fullInterval     = 1 * time.Hour
+	nouveauRougeCode = "ak47"
 )
 
 var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
+type BattlepassReward struct {
+	ID          int              `json:"id"`
+	Code        string           `json:"code"`
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	Cost        int              `json:"cost"`
+	OrderIndex  int              `json:"order_index"`
+	LineIndex   int              `json:"line_index"`
+	State       string           `json:"state"`
+	Remaining   *int             `json:"remaining"`
+	Branch      []BattlepassItem `json:"branch"`
+}
+
+type BattlepassItem struct {
+	ID          int    `json:"id"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Cost        int    `json:"cost"`
+	OrderIndex  int    `json:"order_index"`
+	LineIndex   int    `json:"line_index"`
+	State       string `json:"state"`
+	Remaining   *int   `json:"remaining"`
+}
+
+var lastNouveauRougeRemaining *int
+
 func StartBackgroundScraper(database *sql.DB) {
 	log.Println("Starting background scraper...")
 
-	scrapeQuickCycle(database)
-
-	go func() {
-		fastTicker := time.NewTicker(fastInterval)
-		defer fastTicker.Stop()
-		for range fastTicker.C {
-			scrapeQuickCycle(database)
-		}
-	}()
-
-	go func() {
-		fullTicker := time.NewTicker(fullInterval)
-		defer fullTicker.Stop()
-		for range fullTicker.C {
-			scrapeFullCycle(database)
-		}
-	}()
+	go runLeaderboardLoop(database)
+	go runBattlepassLoop(database)
 }
 
-func scrapeQuickCycle(database *sql.DB) {
-	log.Println("[QUICK] Starting quick scrape cycle (top 200 players)...")
+func runLeaderboardLoop(database *sql.DB) {
+	scrapeLeaderboardQuick(database)
 
-	for page := 1; page <= quickPages; page++ {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		scrapeLeaderboardQuick(database)
+	}
+}
+
+func runBattlepassLoop(database *sql.DB) {
+	checkBattlepass(database)
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		checkBattlepass(database)
+	}
+}
+
+func scrapeLeaderboardQuick(database *sql.DB) {
+	log.Println("[LEADERBOARD] Quick scrape...")
+
+	for page := 1; page <= 30; page++ {
 		players, err := fetchLeaderboardPage(page)
 		if err != nil {
-			log.Printf("[QUICK] Error fetching page %d: %v", page, err)
+			log.Printf("[LEADERBOARD] Error page %d: %v", page, err)
+			time.Sleep(requestDelay)
+			continue
+		}
+		if len(players) == 0 {
+			break
+		}
+
+		now := time.Now()
+		for i := range players {
+			lp := &players[i]
+			player := Player{
+				SteamID:  lp.SteamID,
+				Name:     lp.Name,
+				LastSeen: now,
+			}
+			if err := UpsertPlayer(database, player); err != nil {
+				log.Printf("[LEADERBOARD] Upsert player %s: %v", lp.SteamID, err)
+			}
+
+			stats := PlayerStats{
+				SteamID:      lp.SteamID,
+				Position:     lp.Position,
+				TotalValue:   lp.TotalValue,
+				SkinCount:    lp.SkinCount,
+				SnapshotTime: now,
+			}
+			if err := InsertPlayerStats(database, stats); err != nil {
+				log.Printf("[LEADERBOARD] Insert stats %s: %v", lp.SteamID, err)
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+
+		time.Sleep(requestDelay)
+	}
+
+	log.Println("[LEADERBOARD] Quick scrape done")
+}
+
+func checkBattlepass(database *sql.DB) {
+	log.Println("[BATTLEPASS] Checking rewards...")
+
+	rewards, err := fetchBattlepassRewards()
+	if err != nil {
+		log.Printf("[BATTLEPASS] Error: %v", err)
+		return
+	}
+
+	nouveauRouge := findNouveauRougeReward(rewards)
+	if nouveauRouge == nil {
+		log.Println("[BATTLEPASS] Nouveau Rouge not found in rewards")
+		return
+	}
+
+	remaining := nouveauRouge.Remaining
+	if remaining == nil {
+		log.Println("[BATTLEPASS] Nouveau Rouge has no remaining count")
+		return
+	}
+
+	log.Printf("[BATTLEPASS] Nouveau Rouge remaining: %d", *remaining)
+
+	if lastNouveauRougeRemaining != nil && *remaining != *lastNouveauRougeRemaining {
+		diff := *lastNouveauRougeRemaining - *remaining
+		log.Printf("[BATTLEPASS] ALERT! Nouveau Rouge remaining changed: %d -> %d (claimed: %d)",
+			*lastNouveauRougeRemaining, *remaining, diff)
+
+		for i := 0; i < diff; i++ {
+			go findNewNouveauRougeOwner(database)
+		}
+	}
+
+	lastNouveauRougeRemaining = remaining
+}
+
+func fetchBattlepassRewards() ([]BattlepassReward, error) {
+	url := fmt.Sprintf("%s%s", apiBaseURL, battlepassPath)
+
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var rewards []BattlepassReward
+	if err := json.Unmarshal(body, &rewards); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal: %w", err)
+	}
+
+	return rewards, nil
+}
+
+func findNouveauRougeReward(rewards []BattlepassReward) *BattlepassItem {
+	for i := range rewards {
+		for j := range rewards[i].Branch {
+			item := &rewards[i].Branch[j]
+			if item.Code == nouveauRougeCode {
+				return item
+			}
+		}
+	}
+	return nil
+}
+
+func findNewNouveauRougeOwner(database *sql.DB) {
+	log.Println("[BATTLEPASS] Scanning leaderboard to find Nouveau Rouge owner...")
+
+	for page := 1; page <= 30; page++ {
+		players, err := fetchLeaderboardPage(page)
+		if err != nil {
+			log.Printf("[BATTLEPASS] Error fetching page %d: %v", page, err)
 			time.Sleep(requestDelay)
 			continue
 		}
@@ -64,145 +213,36 @@ func scrapeQuickCycle(database *sql.DB) {
 		}
 
 		for i := range players {
-			if err := savePlayerStats(database, &players[i]); err != nil {
-				log.Printf("[QUICK] Error saving stats for %s: %v", players[i].SteamID, err)
+			lp := &players[i]
+			storage, err := fetchPlayerStorage(lp.SteamID)
+			if err != nil {
+				time.Sleep(requestDelay)
+				continue
 			}
-			time.Sleep(50 * time.Millisecond)
-		}
 
-		storageBatch := players
-		if len(storageBatch) > 50 {
-			storageBatch = storageBatch[:50]
-		}
-		for i := range storageBatch {
-			if err := processPlayerStorage(database, &storageBatch[i]); err != nil {
-				log.Printf("[QUICK] Error processing storage for %s: %v", storageBatch[i].SteamID, err)
+			for _, item := range storage {
+				if item.Name == nouveauRougeName {
+					hasAlert, _ := HasNouveauRougeAlert(database, lp.SteamID)
+					if !hasAlert {
+						alert := NouveauRougeAlert{
+							SteamID:       lp.SteamID,
+							PlayerName:    lp.Name,
+							DetectedAt:    time.Now(),
+							ServerInfo:    "fearproject.ru",
+							StorageStatus: item.Status,
+						}
+						if err := InsertNouveauRougeAlert(database, alert); err != nil {
+							log.Printf("[BATTLEPASS] Error inserting alert: %v", err)
+						} else {
+							log.Printf("[BATTLEPASS] FOUND! Nouveau Rouge owner: %s (%s)", lp.Name, lp.SteamID)
+						}
+					}
+				}
 			}
 			time.Sleep(requestDelay)
 		}
-
 		time.Sleep(requestDelay)
 	}
-
-	log.Println("[QUICK] Quick scrape cycle completed")
-}
-
-func scrapeFullCycle(database *sql.DB) {
-	log.Println("[FULL] Starting full scrape cycle (all pages)...")
-
-	for page := 1; page <= maxPages; page++ {
-		players, err := fetchLeaderboardPage(page)
-		if err != nil {
-			log.Printf("[FULL] Error fetching page %d: %v", page, err)
-			time.Sleep(requestDelay)
-			continue
-		}
-		if len(players) == 0 {
-			break
-		}
-
-		for i := range players {
-			if err := savePlayerStats(database, &players[i]); err != nil {
-				log.Printf("[FULL] Error saving stats for %s: %v", players[i].SteamID, err)
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-
-		time.Sleep(requestDelay)
-	}
-
-	log.Println("[FULL] Scrape cycle completed")
-}
-
-func savePlayerStats(database *sql.DB, lp *LeaderboardPlayer) error {
-	now := time.Now()
-
-	player := Player{
-		SteamID:  lp.SteamID,
-		Name:     lp.Name,
-		LastSeen: now,
-	}
-	if err := UpsertPlayer(database, player); err != nil {
-		return fmt.Errorf("upsert player: %w", err)
-	}
-
-	stats := PlayerStats{
-		SteamID:      lp.SteamID,
-		Position:     lp.Position,
-		TotalValue:   lp.TotalValue,
-		SkinCount:    lp.SkinCount,
-		SnapshotTime: now,
-	}
-	if err := InsertPlayerStats(database, stats); err != nil {
-		return fmt.Errorf("insert stats: %w", err)
-	}
-
-	return nil
-}
-
-func processPlayerStorage(database *sql.DB, lp *LeaderboardPlayer) error {
-	now := time.Now()
-
-	if err := savePlayerStats(database, lp); err != nil {
-		return err
-	}
-
-	storage, err := fetchPlayerStorage(lp.SteamID)
-	if err != nil {
-		log.Printf("Warning: failed to fetch storage for %s: %v", lp.SteamID, err)
-		return nil
-	}
-
-	existingSkins, err := GetExistingSkins(database, lp.SteamID)
-	if err != nil {
-		return fmt.Errorf("get existing skins: %w", err)
-	}
-
-	currentSkins := make(map[string]StorageItem, len(storage))
-	for _, item := range storage {
-		currentSkins[item.Name] = item
-	}
-
-	for _, item := range storage {
-		ps := PlayerSkin{
-			SteamID:   lp.SteamID,
-			SkinName:  item.Name,
-			FirstSeen: now,
-			LastSeen:  now,
-			Status:    item.Status,
-			Price:     item.Price,
-			ItemFloat: item.FloatValue,
-		}
-		if existing, ok := existingSkins[item.Name]; ok {
-			ps.FirstSeen = existing.FirstSeen
-		}
-		if err := UpsertPlayerSkin(database, ps); err != nil {
-			log.Printf("Warning: upsert skin %s for %s: %v", item.Name, lp.SteamID, err)
-			continue
-		}
-
-		if _, existed := existingSkins[item.Name]; !existed {
-			details, _ := json.Marshal(map[string]interface{}{
-				"action": "added", "price": item.Price, "float": item.FloatValue, "status": item.Status,
-			})
-			InsertSkinEvent(database, SkinEvent{
-				SteamID: lp.SteamID, SkinName: item.Name, EventType: "skin_added", DetectedAt: now, Details: details,
-			})
-		}
-	}
-
-	for skinName := range existingSkins {
-		if _, exists := currentSkins[skinName]; !exists {
-			InsertSkinEvent(database, SkinEvent{
-				SteamID: lp.SteamID, SkinName: skinName, EventType: "skin_removed", DetectedAt: now,
-			})
-			database.Exec(`DELETE FROM player_skins WHERE steamid = $1 AND skin_name = $2`, lp.SteamID, skinName)
-		}
-	}
-
-	checkNouveauRouge(database, lp.SteamID, lp.Name, storage)
-
-	return nil
 }
 
 func fetchLeaderboardPage(page int) ([]LeaderboardPlayer, error) {
@@ -255,34 +295,4 @@ func fetchPlayerStorage(steamID string) (ProfileStorage, error) {
 	}
 
 	return storage, nil
-}
-
-func checkNouveauRouge(database *sql.DB, steamID, playerName string, storage ProfileStorage) {
-	for _, item := range storage {
-		if item.Name == nouveauRougeName {
-			log.Printf("Nouveau Rouge detected for player %s (%s)!", playerName, steamID)
-
-			hasAlert, err := HasNouveauRougeAlert(database, steamID)
-			if err != nil {
-				log.Printf("Warning: failed to check existing alerts: %v", err)
-				continue
-			}
-
-			if !hasAlert {
-				alert := NouveauRougeAlert{
-					SteamID:       steamID,
-					PlayerName:    playerName,
-					DetectedAt:    time.Now(),
-					ServerInfo:    "fearproject.ru",
-					StorageStatus: item.Status,
-				}
-				if err := InsertNouveauRougeAlert(database, alert); err != nil {
-					log.Printf("Warning: failed to insert nouveau rouge alert: %v", err)
-				} else {
-					log.Printf("Nouveau Rouge alert created for %s (%s)", playerName, steamID)
-				}
-			}
-			break
-		}
-	}
 }
