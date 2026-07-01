@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -17,22 +18,25 @@ func main() {
 		log.Println("Warning: .env file not found, using environment variables")
 	}
 
+	var database *sql.DB
+
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		log.Fatal("DATABASE_URL environment variable is required")
+		log.Println("WARNING: DATABASE_URL not set. Running without database.")
+	} else {
+		var err error
+		database, err = Connect(databaseURL)
+		if err != nil {
+			log.Printf("WARNING: Failed to connect to database: %v. Running without database.", err)
+			database = nil
+		} else {
+			if err := InitDB(database); err != nil {
+				log.Printf("WARNING: Failed to initialize database: %v", err)
+			} else {
+				go StartBackgroundScraper(database)
+			}
+		}
 	}
-
-	database, err := Connect(databaseURL)
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
-	}
-	defer database.Close()
-
-	if err := InitDB(database); err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-
-	go StartBackgroundScraper(database)
 
 	router := SetupRouter(database)
 
@@ -67,6 +71,10 @@ func main() {
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	if database != nil {
+		database.Close()
 	}
 
 	log.Println("Server stopped")

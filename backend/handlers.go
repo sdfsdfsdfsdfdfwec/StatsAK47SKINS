@@ -266,17 +266,83 @@ func SetupRouter(database *sql.DB) *mux.Router {
 		})
 	})
 
-	api := r.PathPrefix("/api").Subrouter()
+	r.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{
+				Success: false,
+				Error:   "Database not connected",
+			})
+			return
+		}
+		h.HealthHandler(w, r)
+	}).Methods("GET")
 
-	api.HandleFunc("/health", h.HealthHandler).Methods("GET")
-	api.HandleFunc("/players", h.GetPlayersHandler).Methods("GET")
-	api.HandleFunc("/players/{steamid}", h.GetPlayerHandler).Methods("GET")
-	api.HandleFunc("/players/{steamid}/stats", h.GetPlayerStatsHandler).Methods("GET")
-	api.HandleFunc("/players/{steamid}/skins", h.GetPlayerSkinsHandler).Methods("GET")
-	api.HandleFunc("/players/{steamid}/skin-changes", h.GetPlayerSkinChangesHandler).Methods("GET")
-	api.HandleFunc("/skin-tracker", h.GetSkinTrackerHandler).Methods("GET")
-	api.HandleFunc("/skin-tracker/{steamid}", h.GetSkinTrackerByPlayerHandler).Methods("GET")
-	api.HandleFunc("/stats", h.GetStatsHandler).Methods("GET")
+	r.HandleFunc("/api/players", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetPlayersHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/players/{steamid}", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetPlayerHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/players/{steamid}/stats", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetPlayerStatsHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/players/{steamid}/skins", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetPlayerSkinsHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/players/{steamid}/skin-changes", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetPlayerSkinChangesHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/skin-tracker", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetSkinTrackerHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/skin-tracker/{steamid}", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Database not connected"})
+			return
+		}
+		h.GetSkinTrackerByPlayerHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if database == nil {
+			writeJSON(w, http.StatusOK, APIResponse{
+				Success: true,
+				Data:    OverallStats{},
+			})
+			return
+		}
+		h.GetStatsHandler(w, r)
+	}).Methods("GET")
 
 	staticDir := os.Getenv("STATIC_DIR")
 	if staticDir == "" {
