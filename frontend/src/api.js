@@ -10,5 +10,9 @@ export async function fetchJSON(endpoint, options = {}) {
     const text = await res.text().catch(() => '');
     throw new Error(`API error ${res.status}: ${text || res.statusText}`);
   }
-  return res.json();
+  const json = await res.json();
+  if (json && json.data !== undefined) {
+    return json.data;
+  }
+  return json;
 }

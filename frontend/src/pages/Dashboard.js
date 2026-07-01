@@ -13,12 +13,12 @@ export default function Dashboard() {
   useEffect(() => {
     async function load() {
       try {
-        const [statsRes, alertsRes] = await Promise.all([
+        const [statsRes, alertsRes] = await Promise.allSettled([
           fetchJSON('/stats'),
           fetchJSON('/skin-tracker'),
         ]);
-        setStats(statsRes);
-        setAlerts(alertsRes.alerts || []);
+        if (statsRes.status === 'fulfilled') setStats(statsRes.value);
+        if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || []);
       } catch (e) {
         setError(e.message);
       } finally {
@@ -35,8 +35,16 @@ export default function Dashboard() {
     }
   };
 
-  if (loading) return <div className="loading"><div className="spinner" /><p>Loading dashboard...</p></div>;
-  if (error) return <div className="error-msg"><p>Failed to load dashboard</p><p style={{ fontSize: '0.85rem', marginTop: 8 }}>{error}</p></div>;
+  if (loading) return (
+    <div style={{ textAlign: 'center', padding: '60px 20px' }}>
+      <div style={{
+        width: 40, height: 40, border: '3px solid #1e3a5f',
+        borderTopColor: '#3b82f6', borderRadius: '50%',
+        animation: 'spin 0.8s linear infinite', margin: '0 auto 16px'
+      }} />
+      <p style={{ color: '#94a3b8' }}>Loading dashboard...</p>
+    </div>
+  );
 
   return (
     <div>
@@ -57,12 +65,22 @@ export default function Dashboard() {
         </div>
         <div className="stat-card">
           <div className="stat-card-label">Nouveau Rouge Alerts</div>
-          <div className="stat-card-value" style={{ color: 'var(--accent-red)' }}>
+          <div className="stat-card-value" style={{ color: '#ef4444' }}>
             {stats?.total_alerts?.toLocaleString() || '0'}
           </div>
           <div className="stat-card-sub">AK47 skin acquisitions</div>
         </div>
       </div>
+
+      {error && (
+        <div style={{
+          textAlign: 'center', padding: '20px', color: '#f59e0b',
+          background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.2)',
+          borderRadius: 12, marginBottom: 24, fontSize: '0.9rem'
+        }}>
+          API unavailable - some data may not be loaded yet. Backend is starting up...
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: 32 }}>
         <h2 className="section-title">Quick Search</h2>
@@ -84,7 +102,9 @@ export default function Dashboard() {
           <Link to="/skin-tracker" className="btn">View All</Link>
         </div>
         {alerts.length === 0 ? (
-          <div className="empty-msg">No alerts yet</div>
+          <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
+            No alerts yet — data is being collected...
+          </div>
         ) : (
           alerts.slice(0, 10).map((alert, i) => (
             <div key={i} className="alert-item">

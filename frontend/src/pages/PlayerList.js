@@ -25,12 +25,12 @@ export default function PlayerList() {
           const q = search.toLowerCase();
           list = list.filter(
             (p) =>
-              (p.player_name && p.player_name.toLowerCase().includes(q)) ||
+              (p.name && p.name.toLowerCase().includes(q)) ||
               (p.steamid && p.steamid.includes(q))
           );
         }
         setPlayers(list);
-        setTotal(res.total || 0);
+        setTotal(res.pagination?.total || res.total || 0);
       } catch (e) {
         setError(e.message);
       } finally {
@@ -80,11 +80,13 @@ export default function PlayerList() {
       </div>
 
       {loading ? (
-        <div className="loading"><div className="spinner" /><p>Loading players...</p></div>
+        <div style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8' }}>Loading players...</div>
       ) : error ? (
-        <div className="error-msg"><p>{error}</p></div>
+        <div style={{ textAlign: 'center', padding: '40px', color: '#ef4444', background: 'rgba(239,68,68,0.1)', borderRadius: 12 }}>
+          {error}
+        </div>
       ) : players.length === 0 ? (
-        <div className="empty-msg">No players found</div>
+        <div style={{ textAlign: 'center', padding: '60px', color: '#64748b' }}>No players found</div>
       ) : (
         <>
           <div className="table-container">
@@ -93,39 +95,35 @@ export default function PlayerList() {
                 <tr>
                   <th>#</th>
                   <th>Player</th>
-                  <th>Total Value</th>
-                  <th>Skins</th>
-                  <th>Last Snapshot</th>
+                  <th>Last Seen</th>
                 </tr>
               </thead>
               <tbody>
                 {players.map((p) => (
                   <tr key={p.steamid}>
-                    <td style={{ fontFamily: 'Orbitron, monospace', color: 'var(--accent-blue)' }}>
-                      {p.position || '—'}
+                    <td style={{ fontFamily: 'Orbitron, monospace', color: '#3b82f6' }}>
+                      —
                     </td>
                     <td>
                       <Link to={`/player/${p.steamid}`} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <img
-                          src={p.avatar_url || `https://avatars.steamstatic.com/${p.steamid}.jpg`}
-                          alt=""
-                          style={{ width: 32, height: 32, borderRadius: '50%', border: '1px solid var(--border)' }}
-                          onError={(e) => { e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(p.player_name || '?')}&background=1e40af&color=fff&size=32`; }}
-                        />
+                        <div style={{
+                          width: 32, height: 32, borderRadius: '50%',
+                          background: '#1e40af', display: 'flex', alignItems: 'center',
+                          justifyContent: 'center', color: '#fff', fontSize: '0.7rem', fontWeight: 700,
+                          border: '1px solid #1e3a5f'
+                        }}>
+                          {(p.name || '?')[0].toUpperCase()}
+                        </div>
                         <span>
-                          {p.player_name || 'Unknown'}
-                          <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                          {p.name || 'Unknown'}
+                          <span style={{ display: 'block', fontSize: '0.7rem', color: '#64748b', fontFamily: 'monospace' }}>
                             {p.steamid}
                           </span>
                         </span>
                       </Link>
                     </td>
-                    <td className="value-positive" style={{ fontFamily: 'Orbitron, monospace' }}>
-                      {p.total_value != null ? `$${Number(p.total_value).toLocaleString()}` : '—'}
-                    </td>
-                    <td>{p.skin_count || 0}</td>
-                    <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                      {p.last_snapshot ? new Date(p.last_snapshot).toLocaleString() : '—'}
+                    <td style={{ color: '#64748b', fontSize: '0.85rem' }}>
+                      {p.last_seen ? new Date(p.last_seen).toLocaleString() : '—'}
                     </td>
                   </tr>
                 ))}
