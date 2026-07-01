@@ -46,46 +46,39 @@ type NouveauRougeAlert struct {
 	StorageStatus string    `json:"storage_status"`
 }
 
-type LeaderboardEntry struct {
-	Page   int `json:"page"`
-	Limit  int `json:"limit"`
-	Total  int `json:"total"`
-}
-
 type StorageItem struct {
-	Hash        string  `json:"hash"`
+	ID          int     `json:"id"`
 	Name        string  `json:"name"`
-	Type        string  `json:"type"`
-	Rarity      string  `json:"rarity"`
 	Price       float64 `json:"price"`
-	FloatValue  string  `json:"float_value"`
+	Image       string  `json:"image"`
+	FloatValue  string  `json:"item_float"`
+	RarityColor string  `json:"rarity_color"`
 	Status      string  `json:"status"`
-	Tradable    bool    `json:"tradable"`
-	MarketHash  string  `json:"market_hash_name"`
+	CreatedAt   string  `json:"created_at"`
+	SellAt      *string `json:"sell_at"`
+	UnlockAt    *string `json:"unlock_at"`
 }
 
-type ProfileStorage struct {
-	SteamID     string        `json:"steamid"`
-	Items       []StorageItem `json:"storage"`
-	TotalItems  int           `json:"total_items"`
-	TotalValue  float64       `json:"total_value"`
-}
+type ProfileStorage []StorageItem
 
 type LeaderboardPlayer struct {
+	Position   int     `json:"position"`
 	SteamID    string  `json:"steamid"`
 	Name       string  `json:"name"`
-	Position   int     `json:"position"`
-	TotalValue float64 `json:"total_value"`
-	SkinCount  int     `json:"skin_count"`
+	Avatar     string  `json:"avatar_medium"`
+	IsVip      bool    `json:"isVip"`
+	TotalValue float64 `json:"total"`
+	SkinCount  int     `json:"count"`
+	Skins      []struct {
+		Name         string `json:"name"`
+		Image        string `json:"image"`
+		RarityColor  string `json:"rarity_color"`
+	} `json:"skins"`
 }
 
 type LeaderboardResponse struct {
-	Data       []LeaderboardPlayer `json:"data"`
-	Pagination struct {
-		CurrentPage int `json:"current_page"`
-		TotalPages  int `json:"total_pages"`
-		TotalItems  int `json:"total_items"`
-	} `json:"pagination"`
+	Total   int                `json:"total"`
+	Players []LeaderboardPlayer `json:"players"`
 }
 
 type APIResponse struct {

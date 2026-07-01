@@ -92,7 +92,7 @@ func fetchLeaderboardPage(page int) ([]LeaderboardPlayer, error) {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	return leaderboardResp.Data, nil
+	return leaderboardResp.Players, nil
 }
 
 func processPlayer(database *sql.DB, lp LeaderboardPlayer) error {
@@ -132,11 +132,11 @@ func processPlayer(database *sql.DB, lp LeaderboardPlayer) error {
 	}
 
 	currentSkins := make(map[string]StorageItem)
-	for _, item := range storage.Items {
+	for _, item := range storage {
 		currentSkins[item.Name] = item
 	}
 
-	for _, item := range storage.Items {
+	for _, item := range storage {
 		ps := PlayerSkin{
 			SteamID:   lp.SteamID,
 			SkinName:  item.Name,
@@ -207,7 +207,7 @@ func processPlayer(database *sql.DB, lp LeaderboardPlayer) error {
 	return nil
 }
 
-func fetchPlayerStorage(steamID string) (*ProfileStorage, error) {
+func fetchPlayerStorage(steamID string) (ProfileStorage, error) {
 	url := fmt.Sprintf("%s%s", apiBaseURL, fmt.Sprintf(storagePath, steamID))
 
 	resp, err := httpClient.Get(url)
@@ -230,12 +230,11 @@ func fetchPlayerStorage(steamID string) (*ProfileStorage, error) {
 		return nil, fmt.Errorf("failed to unmarshal storage: %w", err)
 	}
 
-	storage.SteamID = steamID
-	return &storage, nil
+	return storage, nil
 }
 
-func checkNouveauRouge(database *sql.DB, steamID, playerName string, storage *ProfileStorage) {
-	for _, item := range storage.Items {
+func checkNouveauRouge(database *sql.DB, steamID, playerName string, storage ProfileStorage) {
+	for _, item := range storage {
 		if item.Name == nouveauRougeName {
 			log.Printf("Nouveau Rouge detected for player %s (%s)!", playerName, steamID)
 
