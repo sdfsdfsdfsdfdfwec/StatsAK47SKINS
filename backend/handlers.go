@@ -233,6 +233,28 @@ func (h *Handlers) GetSkinTrackerByPlayerHandler(w http.ResponseWriter, r *http.
 	})
 }
 
+func (h *Handlers) GetLeaderboardHandler(w http.ResponseWriter, r *http.Request) {
+	limitStr := r.URL.Query().Get("limit")
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit < 1 || limit > 500 {
+		limit = 50
+	}
+
+	players, err := GetLeaderboard(h.db, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to fetch leaderboard")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"players": players,
+			"total":   len(players),
+		},
+	})
+}
+
 func (h *Handlers) GetStatsHandler(w http.ResponseWriter, r *http.Request) {
 	stats, err := GetOverallStats(h.db)
 	if err != nil {
@@ -331,6 +353,10 @@ func SetupRouter(database *sql.DB) *mux.Router {
 			return
 		}
 		h.GetSkinTrackerByPlayerHandler(w, r)
+	}).Methods("GET")
+
+	r.HandleFunc("/api/leaderboard", func(w http.ResponseWriter, r *http.Request) {
+		h.GetLeaderboardHandler(w, r)
 	}).Methods("GET")
 
 	r.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {

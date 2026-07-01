@@ -11,14 +11,16 @@ import (
 )
 
 const (
-	apiBaseURL        = "https://api.fearproject.ru"
-	leaderboardPath   = "/leaderboard/drops"
-	storagePath       = "/profile/%s/storage"
-	requestDelay      = 200 * time.Millisecond
-	maxPages          = 214
-	itemsPerPage      = 10
-	nouveauRougeName  = "AK-47 | Nouveau Rouge"
-	scraperInterval   = 5 * time.Minute
+	apiBaseURL       = "https://api.fearproject.ru"
+	leaderboardPath  = "/leaderboard/drops"
+	storagePath      = "/profile/%s/storage"
+	requestDelay     = 150 * time.Millisecond
+	maxPages         = 214
+	quickPages       = 20
+	itemsPerPage     = 10
+	nouveauRougeName = "AK-47 | Nouveau Rouge"
+	fastInterval     = 15 * time.Minute
+	fullInterval     = 1 * time.Hour
 )
 
 var httpClient = &http.Client{
@@ -27,38 +29,54 @@ var httpClient = &http.Client{
 
 func StartBackgroundScraper(database *sql.DB) {
 	log.Println("Starting background scraper...")
-	scrapeAllPages(database)
 
-	ticker := time.NewTicker(scraperInterval)
-	defer ticker.Stop()
+	scrapeQuickCycle(database)
 
-	for range ticker.C {
-		scrapeAllPages(database)
-	}
+	go func() {
+		fastTicker := time.NewTicker(fastInterval)
+		defer fastTicker.Stop()
+		for range fastTicker.C {
+			scrapeQuickCycle(database)
+		}
+	}()
+
+	go func() {
+		fullTicker := time.NewTicker(fullInterval)
+		defer fullTicker.Stop()
+		for range fullTicker.C {
+			scrapeFullCycle(database)
+		}
+	}()
 }
 
-func scrapeAllPages(database *sql.DB) {
-	log.Println("Starting full scrape cycle...")
+func scrapeQuickCycle(database *sql.DB) {
+	log.Println("[QUICK] Starting quick scrape cycle (top 200 players)...")
 
-	for page := 1; page <= maxPages; page++ {
+	for page := 1; page <= quickPages; page++ {
 		players, err := fetchLeaderboardPage(page)
 		if err != nil {
-			log.Printf("Error fetching page %d: %v", page, err)
+			log.Printf("[QUICK] Error fetching page %d: %v", page, err)
 			time.Sleep(requestDelay)
 			continue
 		}
-
 		if len(players) == 0 {
-			log.Printf("No players on page %d, stopping pagination", page)
 			break
 		}
 
-		log.Printf("Page %d: found %d players", page, len(players))
+		for i := range players {
+			if err := savePlayerStats(database, &players[i]); err != nil {
+				log.Printf("[QUICK] Error saving stats for %s: %v", players[i].SteamID, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 
-		for _, lp := range players {
-			if err := processPlayer(database, lp); err != nil {
-				log.Printf("Error processing player %s (%s): %v", lp.SteamID, lp.Name, err)
-				continue
+		storageBatch := players
+		if len(storageBatch) > 50 {
+			storageBatch = storageBatch[:50]
+		}
+		for i := range storageBatch {
+			if err := processPlayerStorage(database, &storageBatch[i]); err != nil {
+				log.Printf("[QUICK] Error processing storage for %s: %v", storageBatch[i].SteamID, err)
 			}
 			time.Sleep(requestDelay)
 		}
@@ -66,7 +84,125 @@ func scrapeAllPages(database *sql.DB) {
 		time.Sleep(requestDelay)
 	}
 
-	log.Println("Scrape cycle completed")
+	log.Println("[QUICK] Quick scrape cycle completed")
+}
+
+func scrapeFullCycle(database *sql.DB) {
+	log.Println("[FULL] Starting full scrape cycle (all pages)...")
+
+	for page := 1; page <= maxPages; page++ {
+		players, err := fetchLeaderboardPage(page)
+		if err != nil {
+			log.Printf("[FULL] Error fetching page %d: %v", page, err)
+			time.Sleep(requestDelay)
+			continue
+		}
+		if len(players) == 0 {
+			break
+		}
+
+		for i := range players {
+			if err := savePlayerStats(database, &players[i]); err != nil {
+				log.Printf("[FULL] Error saving stats for %s: %v", players[i].SteamID, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		time.Sleep(requestDelay)
+	}
+
+	log.Println("[FULL] Scrape cycle completed")
+}
+
+func savePlayerStats(database *sql.DB, lp *LeaderboardPlayer) error {
+	now := time.Now()
+
+	player := Player{
+		SteamID:  lp.SteamID,
+		Name:     lp.Name,
+		LastSeen: now,
+	}
+	if err := UpsertPlayer(database, player); err != nil {
+		return fmt.Errorf("upsert player: %w", err)
+	}
+
+	stats := PlayerStats{
+		SteamID:      lp.SteamID,
+		Position:     lp.Position,
+		TotalValue:   lp.TotalValue,
+		SkinCount:    lp.SkinCount,
+		SnapshotTime: now,
+	}
+	if err := InsertPlayerStats(database, stats); err != nil {
+		return fmt.Errorf("insert stats: %w", err)
+	}
+
+	return nil
+}
+
+func processPlayerStorage(database *sql.DB, lp *LeaderboardPlayer) error {
+	now := time.Now()
+
+	if err := savePlayerStats(database, lp); err != nil {
+		return err
+	}
+
+	storage, err := fetchPlayerStorage(lp.SteamID)
+	if err != nil {
+		log.Printf("Warning: failed to fetch storage for %s: %v", lp.SteamID, err)
+		return nil
+	}
+
+	existingSkins, err := GetExistingSkins(database, lp.SteamID)
+	if err != nil {
+		return fmt.Errorf("get existing skins: %w", err)
+	}
+
+	currentSkins := make(map[string]StorageItem, len(storage))
+	for _, item := range storage {
+		currentSkins[item.Name] = item
+	}
+
+	for _, item := range storage {
+		ps := PlayerSkin{
+			SteamID:   lp.SteamID,
+			SkinName:  item.Name,
+			FirstSeen: now,
+			LastSeen:  now,
+			Status:    item.Status,
+			Price:     item.Price,
+			ItemFloat: item.FloatValue,
+		}
+		if existing, ok := existingSkins[item.Name]; ok {
+			ps.FirstSeen = existing.FirstSeen
+		}
+		if err := UpsertPlayerSkin(database, ps); err != nil {
+			log.Printf("Warning: upsert skin %s for %s: %v", item.Name, lp.SteamID, err)
+			continue
+		}
+
+		if _, existed := existingSkins[item.Name]; !existed {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action": "added", "price": item.Price, "float": item.FloatValue, "status": item.Status,
+			})
+			InsertSkinEvent(database, SkinEvent{
+				SteamID: lp.SteamID, SkinName: item.Name, EventType: "skin_added", DetectedAt: now, Details: details,
+			})
+		}
+	}
+
+	for skinName := range existingSkins {
+		if _, exists := currentSkins[skinName]; !exists {
+			InsertSkinEvent(database, SkinEvent{
+				SteamID: lp.SteamID, SkinName: skinName, EventType: "skin_removed", DetectedAt: now,
+			})
+			database.Exec(`DELETE FROM player_skins WHERE steamid = $1 AND skin_name = $2`, lp.SteamID, skinName)
+		}
+	}
+
+	checkNouveauRouge(database, lp.SteamID, lp.Name, storage)
+
+	return nil
 }
 
 func fetchLeaderboardPage(page int) ([]LeaderboardPlayer, error) {
@@ -93,118 +229,6 @@ func fetchLeaderboardPage(page int) ([]LeaderboardPlayer, error) {
 	}
 
 	return leaderboardResp.Players, nil
-}
-
-func processPlayer(database *sql.DB, lp LeaderboardPlayer) error {
-	now := time.Now()
-
-	player := Player{
-		SteamID:  lp.SteamID,
-		Name:     lp.Name,
-		LastSeen: now,
-	}
-
-	if err := UpsertPlayer(database, player); err != nil {
-		return fmt.Errorf("failed to upsert player: %w", err)
-	}
-
-	stats := PlayerStats{
-		SteamID:      lp.SteamID,
-		Position:     lp.Position,
-		TotalValue:   lp.TotalValue,
-		SkinCount:    lp.SkinCount,
-		SnapshotTime: now,
-	}
-
-	if err := InsertPlayerStats(database, stats); err != nil {
-		return fmt.Errorf("failed to insert stats: %w", err)
-	}
-
-	storage, err := fetchPlayerStorage(lp.SteamID)
-	if err != nil {
-		log.Printf("Warning: failed to fetch storage for %s: %v", lp.SteamID, err)
-		return nil
-	}
-
-	existingSkins, err := GetExistingSkins(database, lp.SteamID)
-	if err != nil {
-		return fmt.Errorf("failed to get existing skins: %w", err)
-	}
-
-	currentSkins := make(map[string]StorageItem)
-	for _, item := range storage {
-		currentSkins[item.Name] = item
-	}
-
-	for _, item := range storage {
-		ps := PlayerSkin{
-			SteamID:   lp.SteamID,
-			SkinName:  item.Name,
-			FirstSeen: now,
-			LastSeen:  now,
-			Status:    item.Status,
-			Price:     item.Price,
-			ItemFloat: item.FloatValue,
-		}
-
-		if existing, ok := existingSkins[item.Name]; ok {
-			ps.FirstSeen = existing.FirstSeen
-		}
-
-		if err := UpsertPlayerSkin(database, ps); err != nil {
-			log.Printf("Warning: failed to upsert skin %s for %s: %v", item.Name, lp.SteamID, err)
-			continue
-		}
-
-		if _, existed := existingSkins[item.Name]; !existed {
-			details, _ := json.Marshal(map[string]interface{}{
-				"action":  "added",
-				"price":   item.Price,
-				"float":   item.FloatValue,
-				"status":  item.Status,
-			})
-			event := SkinEvent{
-				SteamID:    lp.SteamID,
-				SkinName:   item.Name,
-				EventType:  "skin_added",
-				DetectedAt: now,
-				Details:    details,
-			}
-			if err := InsertSkinEvent(database, event); err != nil {
-				log.Printf("Warning: failed to insert skin event: %v", err)
-			}
-		}
-	}
-
-	for skinName := range existingSkins {
-		if _, exists := currentSkins[skinName]; !exists {
-			details, _ := json.Marshal(map[string]interface{}{
-				"action": "removed",
-			})
-			event := SkinEvent{
-				SteamID:    lp.SteamID,
-				SkinName:   skinName,
-				EventType:  "skin_removed",
-				DetectedAt: now,
-				Details:    details,
-			}
-			if err := InsertSkinEvent(database, event); err != nil {
-				log.Printf("Warning: failed to insert skin removal event: %v", err)
-			}
-
-			_, err := database.Exec(
-				`DELETE FROM player_skins WHERE steamid = $1 AND skin_name = $2`,
-				lp.SteamID, skinName,
-			)
-			if err != nil {
-				log.Printf("Warning: failed to delete removed skin: %v", err)
-			}
-		}
-	}
-
-	checkNouveauRouge(database, lp.SteamID, lp.Name, storage)
-
-	return nil
 }
 
 func fetchPlayerStorage(steamID string) (ProfileStorage, error) {
@@ -249,10 +273,9 @@ func checkNouveauRouge(database *sql.DB, steamID, playerName string, storage Pro
 					SteamID:       steamID,
 					PlayerName:    playerName,
 					DetectedAt:    time.Now(),
-					ServerInfo:    fmt.Sprintf("fearproject.ru"),
+					ServerInfo:    "fearproject.ru",
 					StorageStatus: item.Status,
 				}
-
 				if err := InsertNouveauRougeAlert(database, alert); err != nil {
 					log.Printf("Warning: failed to insert nouveau rouge alert: %v", err)
 				} else {

@@ -360,6 +360,35 @@ func GetNouveauRougeAlertsBySteamID(database *sql.DB, steamID string) ([]Nouveau
 	return alerts, nil
 }
 
+func GetLeaderboard(database *sql.DB, limit int) ([]LeaderboardPlayer, error) {
+	query := `
+		SELECT DISTINCT ON (ps.steamid)
+			ps.steamid, p.name, ps.position, ps.total_value, ps.skin_count, ps.snapshot_time
+		FROM player_stats ps
+		JOIN players p ON p.steamid = ps.steamid
+		WHERE ps.position > 0
+		ORDER BY ps.steamid, ps.snapshot_time DESC
+		ORDER BY ps.position ASC
+		LIMIT $1
+	`
+	rows, err := database.Query(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get leaderboard: %w", err)
+	}
+	defer rows.Close()
+
+	var players []LeaderboardPlayer
+	for rows.Next() {
+		var lp LeaderboardPlayer
+		if err := rows.Scan(&lp.SteamID, &lp.Name, &lp.Position, &lp.TotalValue, &lp.SkinCount, &lp.SnapshotTime); err != nil {
+			return nil, fmt.Errorf("failed to scan leaderboard player: %w", err)
+		}
+		players = append(players, lp)
+	}
+
+	return players, nil
+}
+
 func GetOverallStats(database *sql.DB) (*OverallStats, error) {
 	stats := &OverallStats{}
 

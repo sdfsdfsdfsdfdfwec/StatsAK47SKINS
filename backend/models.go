@@ -62,17 +62,18 @@ type StorageItem struct {
 type ProfileStorage []StorageItem
 
 type LeaderboardPlayer struct {
-	Position   int     `json:"position"`
-	SteamID    string  `json:"steamid"`
-	Name       string  `json:"name"`
-	Avatar     string  `json:"avatar_medium"`
-	IsVip      bool    `json:"isVip"`
-	TotalValue float64 `json:"total"`
-	SkinCount  int     `json:"count"`
-	Skins      []struct {
-		Name         string `json:"name"`
-		Image        string `json:"image"`
-		RarityColor  string `json:"rarity_color"`
+	Position    int       `json:"position"`
+	SteamID     string    `json:"steamid"`
+	Name        string    `json:"name"`
+	Avatar      string    `json:"avatar_medium"`
+	IsVip       bool      `json:"isVip"`
+	TotalValue  float64   `json:"total"`
+	SkinCount   int       `json:"count"`
+	SnapshotTime time.Time `json:"-"`
+	Skins       []struct {
+		Name        string `json:"name"`
+		Image       string `json:"image"`
+		RarityColor string `json:"rarity_color"`
 	} `json:"skins"`
 }
 
