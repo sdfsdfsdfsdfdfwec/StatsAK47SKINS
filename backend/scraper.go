@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,19 +10,17 @@ import (
 )
 
 const (
-	apiBaseURL       = "https://api.fearproject.ru"
-	leaderboardPath  = "/leaderboard/drops"
-	storagePath      = "/profile/%s/storage"
-	battlepassPath   = "/battlepass/rewards"
-	requestDelay     = 100 * time.Millisecond
-	itemsPerPage     = 10
+	apiBaseURL      = "https://api.fearproject.ru"
+	leaderboardPath = "/leaderboard/drops"
+	storagePath     = "/profile/%s/storage"
+	battlepassPath  = "/battlepass/rewards"
+	requestDelay    = 120 * time.Millisecond
+	itemsPerPage    = 10
 	nouveauRougeName = "AK-47 | Nouveau Rouge"
 	nouveauRougeCode = "ak47"
 )
 
-var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
-}
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 type BattlepassReward struct {
 	ID          int              `json:"id"`
@@ -52,40 +49,37 @@ type BattlepassItem struct {
 
 var lastNouveauRougeRemaining *int
 
-func StartBackgroundScraper(database *sql.DB) {
+func StartBackgroundScraper() {
 	log.Println("Starting background scraper...")
 
-	go runLeaderboardLoop(database)
-	go runBattlepassLoop(database)
+	go runLeaderboardLoop()
+	go runBattlepassLoop()
 }
 
-func runLeaderboardLoop(database *sql.DB) {
-	scrapeLeaderboardQuick(database)
-
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		scrapeLeaderboardQuick(database)
+func runLeaderboardLoop() {
+	time.Sleep(5 * time.Second)
+	for {
+		scrapeLeaderboard()
 	}
 }
 
-func runBattlepassLoop(database *sql.DB) {
-	checkBattlepass(database)
-
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		checkBattlepass(database)
+func runBattlepassLoop() {
+	time.Sleep(10 * time.Second)
+	for {
+		checkBattlepass()
+		time.Sleep(60 * time.Second)
 	}
 }
 
-func scrapeLeaderboardQuick(database *sql.DB) {
-	log.Println("[LEADERBOARD] Quick scrape...")
+func scrapeLeaderboard() {
+	log.Println("[SCRAPER] Starting leaderboard scrape...")
+
+	allPlayers := make([]LeaderboardPlayer, 0, 300)
 
 	for page := 1; page <= 30; page++ {
 		players, err := fetchLeaderboardPage(page)
 		if err != nil {
-			log.Printf("[LEADERBOARD] Error page %d: %v", page, err)
+			log.Printf("[SCRAPER] Error page %d: %v", page, err)
 			time.Sleep(requestDelay)
 			continue
 		}
@@ -93,38 +87,97 @@ func scrapeLeaderboardQuick(database *sql.DB) {
 			break
 		}
 
+		allPlayers = append(allPlayers, players...)
+		log.Printf("[SCRAPER] Page %d: %d players", page, len(players))
+
 		now := time.Now()
 		for i := range players {
 			lp := &players[i]
-			player := Player{
+
+			store.UpsertPlayer(Player{
 				SteamID:  lp.SteamID,
 				Name:     lp.Name,
 				LastSeen: now,
-			}
-			if err := UpsertPlayer(database, player); err != nil {
-				log.Printf("[LEADERBOARD] Upsert player %s: %v", lp.SteamID, err)
-			}
+			})
 
-			stats := PlayerStats{
+			store.AddStats(PlayerStats{
 				SteamID:      lp.SteamID,
 				Position:     lp.Position,
 				TotalValue:   lp.TotalValue,
 				SkinCount:    lp.SkinCount,
 				SnapshotTime: now,
-			}
-			if err := InsertPlayerStats(database, stats); err != nil {
-				log.Printf("[LEADERBOARD] Insert stats %s: %v", lp.SteamID, err)
-			}
-			time.Sleep(30 * time.Millisecond)
+			})
+
+			time.Sleep(50 * time.Millisecond)
 		}
 
 		time.Sleep(requestDelay)
 	}
 
-	log.Println("[LEADERBOARD] Quick scrape done")
+	store.SetLeaderboard(allPlayers)
+	log.Printf("[SCRAPER] Done. Total players: %d", len(allPlayers))
+
+	for i := range allPlayers {
+		lp := &allPlayers[i]
+		go fetchAndStoreSkins(lp)
+	}
 }
 
-func checkBattlepass(database *sql.DB) {
+func fetchAndStoreSkins(lp *LeaderboardPlayer) {
+	storage, err := fetchPlayerStorage(lp.SteamID)
+	if err != nil {
+		return
+	}
+
+	skins := make([]PlayerSkin, 0, len(storage))
+	now := time.Now()
+
+	existingSkins := store.GetPlayerSkins(lp.SteamID)
+	existingMap := make(map[string]bool)
+	for _, s := range existingSkins {
+		existingMap[s.SkinName] = true
+	}
+
+	for _, item := range storage {
+		ps := PlayerSkin{
+			SteamID:   lp.SteamID,
+			SkinName:  item.Name,
+			FirstSeen: now,
+			LastSeen:  now,
+			Status:    item.Status,
+			Price:     item.Price,
+			ItemFloat: item.FloatValue,
+		}
+		skins = append(skins, ps)
+
+		if !existingMap[item.Name] {
+			store.AddEvent(SkinEvent{
+				SteamID:    lp.SteamID,
+				SkinName:   item.Name,
+				EventType:  "skin_added",
+				DetectedAt: now,
+			})
+		}
+
+		if item.Name == nouveauRougeName {
+			if !store.HasAlert(lp.SteamID) {
+				alert := NouveauRougeAlert{
+					SteamID:       lp.SteamID,
+					PlayerName:    lp.Name,
+					DetectedAt:    now,
+					ServerInfo:    "fearproject.ru",
+					StorageStatus: item.Status,
+				}
+				store.AddAlert(alert)
+				log.Printf("[SCRAPER] *** NOUVEAU ROUGE FOUND: %s (%s) ***", lp.Name, lp.SteamID)
+			}
+		}
+	}
+
+	store.SetSkins(lp.SteamID, skins)
+}
+
+func checkBattlepass() {
 	log.Println("[BATTLEPASS] Checking rewards...")
 
 	rewards, err := fetchBattlepassRewards()
@@ -149,62 +202,23 @@ func checkBattlepass(database *sql.DB) {
 
 	if lastNouveauRougeRemaining != nil && *remaining != *lastNouveauRougeRemaining {
 		diff := *lastNouveauRougeRemaining - *remaining
-		log.Printf("[BATTLEPASS] ALERT! Nouveau Rouge remaining changed: %d -> %d (claimed: %d)",
+		log.Printf("[BATTLEPASS] !!! ALERT: remaining changed %d -> %d (claimed: %d) !!!",
 			*lastNouveauRougeRemaining, *remaining, diff)
 
 		for i := 0; i < diff; i++ {
-			go findNewNouveauRougeOwner(database)
+			go findNewNouveauRougeOwner()
 		}
 	}
 
 	lastNouveauRougeRemaining = remaining
 }
 
-func fetchBattlepassRewards() ([]BattlepassReward, error) {
-	url := fmt.Sprintf("%s%s", apiBaseURL, battlepassPath)
-
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var rewards []BattlepassReward
-	if err := json.Unmarshal(body, &rewards); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal: %w", err)
-	}
-
-	return rewards, nil
-}
-
-func findNouveauRougeReward(rewards []BattlepassReward) *BattlepassItem {
-	for i := range rewards {
-		for j := range rewards[i].Branch {
-			item := &rewards[i].Branch[j]
-			if item.Code == nouveauRougeCode {
-				return item
-			}
-		}
-	}
-	return nil
-}
-
-func findNewNouveauRougeOwner(database *sql.DB) {
-	log.Println("[BATTLEPASS] Scanning leaderboard to find Nouveau Rouge owner...")
+func findNewNouveauRougeOwner() {
+	log.Println("[BATTLEPASS] Scanning leaderboard for new Nouveau Rouge owner...")
 
 	for page := 1; page <= 30; page++ {
 		players, err := fetchLeaderboardPage(page)
 		if err != nil {
-			log.Printf("[BATTLEPASS] Error fetching page %d: %v", page, err)
 			time.Sleep(requestDelay)
 			continue
 		}
@@ -222,8 +236,7 @@ func findNewNouveauRougeOwner(database *sql.DB) {
 
 			for _, item := range storage {
 				if item.Name == nouveauRougeName {
-					hasAlert, _ := HasNouveauRougeAlert(database, lp.SteamID)
-					if !hasAlert {
+					if !store.HasAlert(lp.SteamID) {
 						alert := NouveauRougeAlert{
 							SteamID:       lp.SteamID,
 							PlayerName:    lp.Name,
@@ -231,11 +244,8 @@ func findNewNouveauRougeOwner(database *sql.DB) {
 							ServerInfo:    "fearproject.ru",
 							StorageStatus: item.Status,
 						}
-						if err := InsertNouveauRougeAlert(database, alert); err != nil {
-							log.Printf("[BATTLEPASS] Error inserting alert: %v", err)
-						} else {
-							log.Printf("[BATTLEPASS] FOUND! Nouveau Rouge owner: %s (%s)", lp.Name, lp.SteamID)
-						}
+						store.AddAlert(alert)
+						log.Printf("[BATTLEPASS] *** OWNER FOUND: %s (%s) ***", lp.Name, lp.SteamID)
 					}
 				}
 			}
@@ -250,25 +260,25 @@ func fetchLeaderboardPage(page int) ([]LeaderboardPlayer, error) {
 
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, err
 	}
 
-	var leaderboardResp LeaderboardResponse
-	if err := json.Unmarshal(body, &leaderboardResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	var r LeaderboardResponse
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, err
 	}
 
-	return leaderboardResp.Players, nil
+	return r.Players, nil
 }
 
 func fetchPlayerStorage(steamID string) (ProfileStorage, error) {
@@ -276,23 +286,61 @@ func fetchPlayerStorage(steamID string) (ProfileStorage, error) {
 
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, err
 	}
 
 	var storage ProfileStorage
 	if err := json.Unmarshal(body, &storage); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal storage: %w", err)
+		return nil, err
 	}
 
 	return storage, nil
+}
+
+func fetchBattlepassRewards() ([]BattlepassReward, error) {
+	url := fmt.Sprintf("%s%s", apiBaseURL, battlepassPath)
+
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var rewards []BattlepassReward
+	if err := json.Unmarshal(body, &rewards); err != nil {
+		return nil, err
+	}
+
+	return rewards, nil
+}
+
+func findNouveauRougeReward(rewards []BattlepassReward) *BattlepassItem {
+	for i := range rewards {
+		for j := range rewards[i].Branch {
+			item := &rewards[i].Branch[j]
+			if item.Code == nouveauRougeCode {
+				return item
+			}
+		}
+	}
+	return nil
 }
