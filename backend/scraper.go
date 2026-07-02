@@ -10,14 +10,16 @@ import (
 )
 
 const (
-	apiBaseURL      = "https://api.fearproject.ru"
-	leaderboardPath = "/leaderboard/drops"
-	storagePath     = "/profile/%s/storage"
-	battlepassPath  = "/battlepass/rewards"
-	requestDelay    = 120 * time.Millisecond
-	itemsPerPage    = 10
+	apiBaseURL       = "https://api.fearproject.ru"
+	leaderboardPath  = "/leaderboard/drops"
+	storagePath      = "/profile/%s/storage"
+	battlepassPath   = "/battlepass/rewards"
+	requestDelay     = 120 * time.Millisecond
+	itemsPerPage     = 10
 	nouveauRougeName = "AK-47 | Nouveau Rouge"
 	nouveauRougeCode = "ak47"
+	maxPages         = 300
+	storageBatchSize = 50
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -47,7 +49,9 @@ type BattlepassItem struct {
 	Remaining   *int   `json:"remaining"`
 }
 
-var lastNouveauRougeRemaining *int
+var lastNouveauRougeRemaining = intPtr(20)
+
+func intPtr(v int) *int { return &v }
 
 func StartBackgroundScraper() {
 	log.Println("Starting background scraper...")
@@ -57,9 +61,10 @@ func StartBackgroundScraper() {
 }
 
 func runLeaderboardLoop() {
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	for {
-		scrapeLeaderboard()
+		scrapeAllLeaderboardPages()
+		time.Sleep(20 * time.Second)
 	}
 }
 
@@ -71,12 +76,12 @@ func runBattlepassLoop() {
 	}
 }
 
-func scrapeLeaderboard() {
-	log.Println("[SCRAPER] Starting leaderboard scrape...")
+func scrapeAllLeaderboardPages() {
+	log.Println("[SCRAPER] Starting full leaderboard scrape...")
 
-	allPlayers := make([]LeaderboardPlayer, 0, 300)
+	allPlayers := make([]LeaderboardPlayer, 0, 2200)
 
-	for page := 1; page <= 30; page++ {
+	for page := 1; page <= maxPages; page++ {
 		players, err := fetchLeaderboardPage(page)
 		if err != nil {
 			log.Printf("[SCRAPER] Error page %d: %v", page, err)
@@ -84,22 +89,20 @@ func scrapeLeaderboard() {
 			continue
 		}
 		if len(players) == 0 {
+			log.Printf("[SCRAPER] No players on page %d, stopping", page)
 			break
 		}
 
 		allPlayers = append(allPlayers, players...)
-		log.Printf("[SCRAPER] Page %d: %d players", page, len(players))
 
 		now := time.Now()
 		for i := range players {
 			lp := &players[i]
-
 			store.UpsertPlayer(Player{
 				SteamID:  lp.SteamID,
 				Name:     lp.Name,
 				LastSeen: now,
 			})
-
 			store.AddStats(PlayerStats{
 				SteamID:      lp.SteamID,
 				Position:     lp.Position,
@@ -107,74 +110,54 @@ func scrapeLeaderboard() {
 				SkinCount:    lp.SkinCount,
 				SnapshotTime: now,
 			})
-
-			time.Sleep(50 * time.Millisecond)
 		}
 
+		if page%20 == 0 {
+			log.Printf("[SCRAPER] Progress: page %d, total players so far: %d", page, len(allPlayers))
+		}
 		time.Sleep(requestDelay)
 	}
 
 	store.SetLeaderboard(allPlayers)
-	log.Printf("[SCRAPER] Done. Total players: %d", len(allPlayers))
+	log.Printf("[SCRAPER] Leaderboard scrape done. Total: %d players", len(allPlayers))
 
-	for i := range allPlayers {
-		lp := &allPlayers[i]
-		go fetchAndStoreSkins(lp)
-	}
+	go scanStorageForNouveauRouge(allPlayers)
 }
 
-func fetchAndStoreSkins(lp *LeaderboardPlayer) {
-	storage, err := fetchPlayerStorage(lp.SteamID)
-	if err != nil {
-		return
-	}
+func scanStorageForNouveauRouge(players []LeaderboardPlayer) {
+	log.Printf("[SCRAPER] Scanning storage for Nouveau Rouge (%d players)...", len(players))
 
-	skins := make([]PlayerSkin, 0, len(storage))
-	now := time.Now()
-
-	existingSkins := store.GetPlayerSkins(lp.SteamID)
-	existingMap := make(map[string]bool)
-	for _, s := range existingSkins {
-		existingMap[s.SkinName] = true
-	}
-
-	for _, item := range storage {
-		ps := PlayerSkin{
-			SteamID:   lp.SteamID,
-			SkinName:  item.Name,
-			FirstSeen: now,
-			LastSeen:  now,
-			Status:    item.Status,
-			Price:     item.Price,
-			ItemFloat: item.FloatValue,
-		}
-		skins = append(skins, ps)
-
-		if !existingMap[item.Name] {
-			store.AddEvent(SkinEvent{
-				SteamID:    lp.SteamID,
-				SkinName:   item.Name,
-				EventType:  "skin_added",
-				DetectedAt: now,
-			})
+	for i := range players {
+		lp := &players[i]
+		storage, err := fetchPlayerStorage(lp.SteamID)
+		if err != nil {
+			time.Sleep(requestDelay)
+			continue
 		}
 
-		if item.Name == nouveauRougeName {
-			if !store.HasAlert(lp.SteamID) {
-				alert := NouveauRougeAlert{
-					SteamID:       lp.SteamID,
-					PlayerName:    lp.Name,
-					DetectedAt:    now,
-					ServerInfo:    "fearproject.ru",
-					StorageStatus: item.Status,
+		for _, item := range storage {
+			if item.Name == nouveauRougeName {
+				if !store.HasAlert(lp.SteamID) {
+					alert := NouveauRougeAlert{
+						SteamID:       lp.SteamID,
+						PlayerName:    lp.Name,
+						DetectedAt:    time.Now(),
+						ServerInfo:    "fearproject.ru",
+						StorageStatus: item.Status,
+					}
+					store.AddAlert(alert)
+					log.Printf("[SCRAPER] *** NOUVEAU ROUGE: %s (%s) ***", lp.Name, lp.SteamID)
 				}
-				store.AddAlert(alert)
-				log.Printf("[SCRAPER] *** NOUVEAU ROUGE FOUND: %s (%s) ***", lp.Name, lp.SteamID)
 			}
 		}
+
+		if (i+1)%100 == 0 {
+			log.Printf("[SCRAPER] Storage scan progress: %d/%d", i+1, len(players))
+		}
+		time.Sleep(requestDelay)
 	}
 
-	store.SetSkins(lp.SteamID, skins)
+	log.Printf("[SCRAPER] Storage scan complete")
 }
 
 func checkBattlepass() {
@@ -205,53 +188,36 @@ func checkBattlepass() {
 		log.Printf("[BATTLEPASS] !!! ALERT: remaining changed %d -> %d (claimed: %d) !!!",
 			*lastNouveauRougeRemaining, *remaining, diff)
 
-		for i := 0; i < diff; i++ {
-			go findNewNouveauRougeOwner()
+		players := store.GetLeaderboard(3000)
+		for i := range players {
+			lp := &players[i]
+			go checkPlayerForNouveauRouge(lp)
 		}
 	}
 
 	lastNouveauRougeRemaining = remaining
 }
 
-func findNewNouveauRougeOwner() {
-	log.Println("[BATTLEPASS] Scanning leaderboard for new Nouveau Rouge owner...")
+func checkPlayerForNouveauRouge(lp *LeaderboardPlayer) {
+	storage, err := fetchPlayerStorage(lp.SteamID)
+	if err != nil {
+		return
+	}
 
-	for page := 1; page <= 30; page++ {
-		players, err := fetchLeaderboardPage(page)
-		if err != nil {
-			time.Sleep(requestDelay)
-			continue
-		}
-		if len(players) == 0 {
-			break
-		}
-
-		for i := range players {
-			lp := &players[i]
-			storage, err := fetchPlayerStorage(lp.SteamID)
-			if err != nil {
-				time.Sleep(requestDelay)
-				continue
-			}
-
-			for _, item := range storage {
-				if item.Name == nouveauRougeName {
-					if !store.HasAlert(lp.SteamID) {
-						alert := NouveauRougeAlert{
-							SteamID:       lp.SteamID,
-							PlayerName:    lp.Name,
-							DetectedAt:    time.Now(),
-							ServerInfo:    "fearproject.ru",
-							StorageStatus: item.Status,
-						}
-						store.AddAlert(alert)
-						log.Printf("[BATTLEPASS] *** OWNER FOUND: %s (%s) ***", lp.Name, lp.SteamID)
-					}
+	for _, item := range storage {
+		if item.Name == nouveauRougeName {
+			if !store.HasAlert(lp.SteamID) {
+				alert := NouveauRougeAlert{
+					SteamID:       lp.SteamID,
+					PlayerName:    lp.Name,
+					DetectedAt:    time.Now(),
+					ServerInfo:    "fearproject.ru",
+					StorageStatus: item.Status,
 				}
+				store.AddAlert(alert)
+				log.Printf("[BATTLEPASS] *** OWNER FOUND: %s (%s) ***", lp.Name, lp.SteamID)
 			}
-			time.Sleep(requestDelay)
 		}
-		time.Sleep(requestDelay)
 	}
 }
 
